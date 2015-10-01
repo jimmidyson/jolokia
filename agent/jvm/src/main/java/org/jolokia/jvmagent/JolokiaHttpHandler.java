@@ -16,31 +16,47 @@ package org.jolokia.jvmagent;
  * limitations under the License.
  */
 
-import java.io.*;
-import java.net.InetSocketAddress;
-import java.net.URI;
-import java.security.PrivilegedActionException;
-import java.security.PrivilegedExceptionAction;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
-import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-import javax.management.MalformedObjectNameException;
-import javax.management.RuntimeMBeanException;
-import javax.security.auth.Subject;
-
-import com.sun.net.httpserver.*;
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpsExchange;
 import org.jolokia.backend.BackendManager;
 import org.jolokia.config.ConfigKey;
 import org.jolokia.config.Configuration;
 import org.jolokia.discovery.AgentDetails;
 import org.jolokia.discovery.DiscoveryMulticastResponder;
 import org.jolokia.http.HttpRequestHandler;
-import org.jolokia.restrictor.*;
-import org.jolokia.util.*;
+import org.jolokia.restrictor.AllowAllRestrictor;
+import org.jolokia.restrictor.DenyAllRestrictor;
+import org.jolokia.restrictor.Restrictor;
+import org.jolokia.restrictor.RestrictorFactory;
+import org.jolokia.util.ClassUtil;
+import org.jolokia.util.LogHandler;
+import org.jolokia.util.NetworkUtil;
 import org.json.simple.JSONAware;
+
+import javax.management.MalformedObjectNameException;
+import javax.management.RuntimeMBeanException;
+import javax.security.auth.Subject;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.security.PrivilegedActionException;
+import java.security.PrivilegedExceptionAction;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateParsingException;
+import java.security.cert.X509Certificate;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.Locale;
+import java.util.Map;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * HttpHandler for handling a jolokia request
@@ -49,6 +65,8 @@ import org.json.simple.JSONAware;
  * @since Mar 3, 2010
  */
 public class JolokiaHttpHandler implements HttpHandler {
+
+    private static final String CLIENTAUTH_OID = "1.3.6.1.5.5.7.3.2";
 
     // Backendmanager for doing request
     private BackendManager backendManager;
@@ -157,6 +175,25 @@ public class JolokiaHttpHandler implements HttpHandler {
      * @throws IllegalStateException if the handler has not yet been started
      */
     public void handle(final HttpExchange pHttpExchange) throws IOException {
+        try {
+            HttpsExchange httpsExchange = (HttpsExchange) pHttpExchange;
+            Certificate[] peerCerts = httpsExchange.getSSLSession().getPeerCertificates();
+            if (peerCerts != null && peerCerts.length > 0) {
+                try {
+                    X509Certificate clientCert = (X509Certificate) peerCerts[0];
+                    if (clientCert.getExtendedKeyUsage() == null || !clientCert.getExtendedKeyUsage().contains(CLIENTAUTH_OID)) {
+                        sendForbidden(pHttpExchange);
+                    }
+                } catch (ClassCastException e) {
+                    sendForbidden(pHttpExchange);
+                } catch (CertificateParsingException e) {
+                    sendForbidden(pHttpExchange);
+                }
+            }
+        } catch (ClassCastException e) {
+            // Not an SSL connection so ignore it
+        }
+
         Subject subject = (Subject) pHttpExchange.getAttribute(ConfigKey.JAAS_SUBJECT_REQUEST_ATTRIBUTE);
         if (subject!=null)  {
             try {
@@ -293,6 +330,14 @@ public class JolokiaHttpHandler implements HttpHandler {
         // answers sometimes which seems to be an implementation peculiarity from Tomcat
         cal.add(Calendar.HOUR, -1);
         headers.set("Expires",formatHeaderDate(cal.getTime()));
+    }
+
+    private void sendForbidden(HttpExchange pExchange) throws IOException {
+        String response = "403 (Forbidden)\n";
+        pExchange.sendResponseHeaders(403, response.length());
+        OutputStream os = pExchange.getResponseBody();
+        os.write(response.getBytes());
+        os.close();
     }
 
     private void sendResponse(HttpExchange pExchange, ParsedUri pParsedUri, JSONAware pJson) throws IOException {
